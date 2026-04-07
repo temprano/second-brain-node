@@ -1,0 +1,22 @@
+{
+  "name": "second-brain-pipeline",
+  "version": "1.0.0",
+  "description": "Automated second brain: AI research → Obsidian → NotebookLM → Anki",
+  "type": "module",
+  "main": "src/pipeline/run.js",
+  "scripts": {
+    "start": "node src/pipeline/run.js",
+    "research": "node src/pipeline/run.js",
+    "dev": "node --watch src/pipeline/run.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.40.0",
+    "chalk": "^5.3.0",
+    "dotenv": "^16.4.0",
+    "node-fetch": "^3.3.2",
+    "openai": "^6.33.0",
+    "ora": "^8.0.1",
+    "unpdf": "^1.4.0",
+    "zod": "^3.23.0"
+  }
+}

@@ -1,0 +1,38 @@
+# OpenClaw config.yaml — webhook configuration
+# ─────────────────────────────────────────────────────────────────────────────
+# Add or merge this into your existing ~/.openclaw/config.yaml
+# This enables OpenClaw to RECEIVE callbacks from your VPS pipeline
+# ─────────────────────────────────────────────────────────────────────────────
+
+hooks:
+  enabled: true
+
+  # Token for incoming webhooks — your VPS pipeline uses this to POST back
+  # Must match OPENCLAW_HOOKS_TOKEN in your VPS .env
+  # Generate one: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+  token: "${OPENCLAW_HOOKS_TOKEN}"
+
+  # URL path for the hooks endpoint (default: /hooks)
+  path: "/hooks"
+
+  # Default session — keeps pipeline notifications in their own thread
+  defaultSessionKey: "hook:second-brain"
+
+  # Only allow the main agent to be triggered by webhooks
+  allowedAgentIds: ["main"]
+
+  # Keep session key overrides off unless you need them
+  allowRequestSessionKey: false
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Environment variables to set alongside config.yaml
+# Add these to your OpenClaw environment or .env file
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# OPENCLAW_HOOKS_TOKEN=your-long-random-token-here
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# How to reload config after editing:
+#   pm2 restart openclaw    (or however you run OpenClaw)
+# ─────────────────────────────────────────────────────────────────────────────
