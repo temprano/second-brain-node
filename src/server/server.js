@@ -29,6 +29,7 @@ import { notifyJobComplete, notifyJobError } from '../connectors/openclaw.js'
 import { extractPDF, savePDFToVault } from '../providers/pdf.js'
 import { parseMultipart } from './multipart.js'
 import { augmentTopic } from '../agents/augment.js'
+import { analyzeContract, askContractQuestion, getSession, listSessions, formatAnalysisForChat } from '../agents/contract.js'
 
 const PORT   = parseInt(process.env.WEBHOOK_PORT   || '3579')
 const SECRET = process.env.WEBHOOK_SECRET
@@ -298,17 +299,186 @@ async function handleUpload(req, res) {
       job.finishedAt = new Date().toISOString()
       job.result     = { ...result, pdfPath: vaultPDFPath, pages: extracted.pageCount, words: extracted.wordCount }
 
-      console.log(\`[\${jobId}] ✓ PDF processed: \${topic} (\${extracted.pageCount} pages, \${extracted.wordCount} words)\`)
+      console.log(`[${jobId}] ✓ PDF processed: ${topic} (${extracted.pageCount} pages, ${extracted.wordCount} words)`)
       await notifyJobComplete(result, 'Augment', topic)
 
     } catch (err) {
       job.status     = 'error'
       job.finishedAt = new Date().toISOString()
       job.error      = err.message
-      console.error(\`[\${jobId}] ✗ PDF error: \${err.message}\`)
+      console.error(`[${jobId}] ✗ PDF error: ${err.message}`)
       await notifyJobError(err.message, 'Augment', topic)
     }
+  })();
+}
+
+// ── Contract analysis handler ─────────────────────────────────────────────────
+// Accepts multipart/form-data with a PDF file.
+// Extracts text, runs contract analysis, stores session for Q&A.
+
+async function handleContractUpload(req, res) {
+  const contentType = req.headers['content-type'] || ''
+
+  if (!contentType.includes('multipart/form-data')) {
+    return send(res, 400, {
+      error: 'Expected multipart/form-data',
+      hint: 'Send the PDF as a form field named "file"',
+    })
+  }
+
+  let parsed
+  try {
+    parsed = await parseMultipart(req)
+  } catch (err) {
+    return send(res, 400, { error: `Could not parse upload: ${err.message}` })
+  }
+
+  const pdfFile = parsed.files?.file
+  if (!pdfFile) {
+    return send(res, 400, {
+      error: 'No file found in upload',
+      hint: 'Include a form field named "file" with the PDF attached',
+    })
+  }
+
+  if (!pdfFile.mimetype?.includes('pdf') && !pdfFile.filename?.endsWith('.pdf')) {
+    return send(res, 400, { error: 'Only PDF files are supported' })
+  }
+
+  const documentName = parsed.fields?.documentName || parsed.fields?.topic ||
+    pdfFile.filename?.replace(/\.pdf$/i, '').replace(/_/g, ' ') || 'Uploaded Document'
+  const jobId = randomUUID().slice(0, 8)
+
+  const job = {
+    jobId,
+    command:    `contract: ${documentName} [PDF: ${pdfFile.filename}]`,
+    intent:     'Contract',
+    topic:      documentName,
+    status:     'queued',
+    createdAt:  new Date().toISOString(),
+    startedAt:  null,
+    finishedAt: null,
+    result:     null,
+    error:      null,
+  }
+  addJob(jobId, job)
+
+  send(res, 202, {
+    status:   'queued',
+    jobId,
+    intent:   'Contract',
+    topic:    documentName,
+    filename: pdfFile.filename,
+    size:     pdfFile.size,
+    message:  `PDF received. Analyzing contract... Check /status/${jobId}`,
+  })
+
+  // Process async
+  job.status    = 'running'
+  job.startedAt = new Date().toISOString()
+
+  ;(async () => {
+    try {
+      // Step 1: Extract text from PDF
+      const { assessExtraction } = await import('../providers/pdf.js')
+      const extracted = await extractPDF(pdfFile.buffer)
+      const quality   = assessExtraction(extracted.text, extracted.pageCount)
+
+      console.log(`  [${jobId}] PDF quality: ${quality.assessment} (${quality.wordCount} words, ~${quality.avgWordsPerPage} words/page)`)
+
+      if (extracted.wordCount < 50) {
+        throw new Error(
+          extracted.warnings[0] ||
+          'PDF appears to be scanned or image-based — too little text extracted'
+        )
+      }
+
+      // Step 2: Save PDF to Obsidian vault attachments
+      let vaultPDFPath = null
+      try {
+        vaultPDFPath = await savePDFToVault(pdfFile.buffer, pdfFile.filename)
+      } catch (e) {
+        console.warn(`  ⚠ Could not save PDF to vault: ${e.message}`)
+      }
+
+      // Step 3: Run contract analysis
+      const result = await analyzeContract(extracted.text, {
+        documentName,
+        pdfMetadata: extracted.metadata,
+      })
+
+      job.status     = 'done'
+      job.finishedAt = new Date().toISOString()
+      job.result     = {
+        sessionId:    result.sessionId,
+        documentName: result.documentName,
+        documentType: result.analysis?.document_type,
+        riskScore:    result.analysis?.risk_rating?.score,
+        wordCount:    result.wordCount,
+        pageCount:    result.pageCount,
+        pdfPath:      vaultPDFPath,
+        truncated:    result.truncated,
+      }
+
+      console.log(`[${jobId}] ✓ Contract analyzed: ${documentName} (${extracted.pageCount} pages, ${extracted.wordCount} words)`)
+
+      // Notify OpenClaw with formatted analysis
+      const chatText = formatAnalysisForChat(result)
+      await notifyJobComplete(
+        { title: documentName, note: vaultPDFPath, deck: null, cards: 0, sessionId: result.sessionId },
+        'Contract',
+        documentName
+      )
+
+    } catch (err) {
+      job.status     = 'error'
+      job.finishedAt = new Date().toISOString()
+      job.error      = err.message
+      console.error(`[${jobId}] ✗ Contract error: ${err.message}`)
+      await notifyJobError(err.message, 'Contract', documentName)
+    }
   })()
+}
+
+// ── Contract Q&A handler ──────────────────────────────────────────────────────
+// POST /contract/ask { "sessionId": "...", "question": "..." }
+
+async function handleContractAsk(req, res) {
+  const body = await readBody(req)
+  const { sessionId, question } = body
+
+  if (!sessionId) {
+    return send(res, 400, {
+      error: 'Missing "sessionId" — provide the session ID from the contract analysis',
+      hint: 'Upload a contract PDF to /contract first to get a sessionId',
+    })
+  }
+
+  if (!question || question.trim().length < 3) {
+    return send(res, 400, {
+      error: 'Missing or too short "question" field',
+      examples: [
+        'What is the cancellation policy?',
+        'What fees am I responsible for?',
+        'When does this contract expire?',
+        'What happens if I break the lease early?',
+      ],
+    })
+  }
+
+  try {
+    const result = await askContractQuestion(sessionId, question)
+    send(res, 200, result)
+  } catch (err) {
+    const status = err.message.includes('not found') ? 404 : 500
+    send(res, status, { error: err.message })
+  }
+}
+
+// ── Contract sessions list handler ────────────────────────────────────────────
+
+function handleContractSessions(req, res) {
+  send(res, 200, { sessions: listSessions() })
 }
 
 // ── Router ────────────────────────────────────────────────────────────────────
@@ -338,6 +508,18 @@ const server = createServer(async (req, res) => {
     return handleUpload(req, res)
   }
 
+  if (method === 'POST' && path === '/contract') {
+    return handleContractUpload(req, res)
+  }
+
+  if (method === 'POST' && path === '/contract/ask') {
+    return handleContractAsk(req, res)
+  }
+
+  if (method === 'GET' && path === '/contract/sessions') {
+    return handleContractSessions(req, res)
+  }
+
   if (method === 'GET' && path.startsWith('/status/')) {
     const jobId = path.split('/')[2]
     return handleStatus(req, res, jobId)
@@ -349,7 +531,16 @@ const server = createServer(async (req, res) => {
 
   send(res, 404, {
     error: 'Route not found',
-    routes: ['POST /run', 'POST /upload', 'GET /status/:jobId', 'GET /jobs', 'GET /health'],
+    routes: [
+      'POST /run',
+      'POST /upload',
+      'POST /contract',
+      'POST /contract/ask',
+      'GET /contract/sessions',
+      'GET /status/:jobId',
+      'GET /jobs',
+      'GET /health',
+    ],
   })
 })
 
@@ -361,7 +552,9 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`\n   Send commands:`)
   console.log(`   POST /run { "command": "research: topic" }`)
   console.log(`   POST /run { "command": "learning: topic" }`)
-  console.log(`   POST /run { "command": "review: topic" }\n`)
+  console.log(`   POST /run { "command": "review: topic" }`)
+  console.log(`   POST /contract (multipart PDF upload)`)
+  console.log(`   POST /contract/ask { "sessionId": "...", "question": "..." }\n`)
 })
 
 export default server

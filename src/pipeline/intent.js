@@ -180,6 +180,28 @@ Focus on:
     cardFocus:    'Focus cards on the key claims and evidence in this source.',
     isAugment:    true,
   },
+
+  // "contract: [upload PDF]" — parse and evaluate contracts, policies, agreements
+  contract: {
+    label:        'Contract',
+    vaultFolder:  '100-Learning/Contracts',
+    deckSuffix:   () => null,
+    searchAngles: () => [],
+    persona:      null,
+    cardFocus:    null,
+    isContract:   true,
+  },
+
+  // "contract ask: <sessionId> | question" — follow-up Q&A on an analyzed document
+  'contract ask': {
+    label:        'Contract Q&A',
+    vaultFolder:  null,
+    deckSuffix:   () => null,
+    searchAngles: () => [],
+    persona:      null,
+    cardFocus:    null,
+    isContractQA: true,
+  },
 }
 
 // Default fallback for unrecognised intents
@@ -216,8 +238,42 @@ export function parseIntent(input) {
     const maybeIntent = trimmed.slice(0, colonIdx).trim().toLowerCase()
     const topic       = trimmed.slice(colonIdx + 1).trim()
 
+    // Check for two-word intents like "contract ask"
+    const twoWord = trimmed.slice(0, colonIdx).trim().toLowerCase()
+    const spaceIdx = twoWord.lastIndexOf(' ')
+    if (spaceIdx > 0 && INTENTS[twoWord]) {
+      const intent = INTENTS[twoWord]
+      const afterColon = trimmed.slice(colonIdx + 1).trim()
+
+      if (intent.isContractQA) {
+        // "contract ask: <sessionId> | question"
+        const pipeIdx = afterColon.indexOf('|')
+        const sessionId = pipeIdx > 0 ? afterColon.slice(0, pipeIdx).trim() : afterColon.trim()
+        const question  = pipeIdx > 0 ? afterColon.slice(pipeIdx + 1).trim() : ''
+        return {
+          intentKey:     twoWord,
+          intent:        intent.label,
+          topic:         sessionId,
+          sessionId,
+          question,
+          isContractQA:  true,
+        }
+      }
+    }
+
     if (INTENTS[maybeIntent] && topic.length > 0) {
       const intent = INTENTS[maybeIntent]
+
+      // Contract intents: route to contract analysis pipeline
+      if (intent.isContract) {
+        return {
+          intentKey:    maybeIntent,
+          intent:       intent.label,
+          topic:        topic || 'Uploaded Document',
+          vaultFolder:  intent.vaultFolder,
+          isContract:   true,
+        }
+      }
 
       // Augment intents: "augment: topic name | article text here..."
       // Or:             "augment: topic name\n\narticle text here..."
