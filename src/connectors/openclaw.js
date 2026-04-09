@@ -60,28 +60,62 @@ export async function notifyOpenClaw(text, opts = {}) {
     deliver,
   }
 
-  try {
-    const response = await fetch(`${OPENCLAW_HOST()}/hooks/agent`, {
-      method:  'POST',
-      headers: {
-        'Authorization':   `Bearer ${token}`,
-        'Content-Type':    'application/json',
-      },
-      body:    JSON.stringify(payload),
-      signal:  AbortSignal.timeout(10_000),
-    })
+  // OpenClaw webhook endpoint paths to try in order.
+  // Different versions use different paths:
+  //   /hooks/agent  — full routing (agentId, sessionKey, wakeMode)
+  //   /hooks/wake   — simple wake (just message + agentId)
+  //   /hooks        — base hooks path (some versions)
+  const host = OPENCLAW_HOST()
+  const endpoints = [
+    `${host}/hooks/agent`,
+    `${host}/hooks/wake`,
+    `${host}/hooks`,
+  ]
 
-    if (!response.ok) {
-      const body = await response.text()
-      throw new Error(`OpenClaw returned ${response.status}: ${body}`)
+  let lastError = null
+
+  for (const url of endpoints) {
+    try {
+      const response = await fetch(url, {
+        method:  'POST',
+        headers: {
+          'Authorization':   `Bearer ${token}`,
+          'Content-Type':    'application/json',
+        },
+        body:    JSON.stringify(payload),
+        signal:  AbortSignal.timeout(10_000),
+      })
+
+      if (response.status === 405) {
+        // Method not allowed — try next endpoint path
+        console.warn(`  ⚠ ${url} returned 405 — trying next endpoint`)
+        lastError = `405 Method Not Allowed on ${url}`
+        continue
+      }
+
+      if (!response.ok) {
+        const body = await response.text()
+        throw new Error(`OpenClaw returned ${response.status}: ${body}`)
+      }
+
+      return { ok: true, status: response.status, endpoint: url }
+
+    } catch (err) {
+      if (err.message?.includes('405')) {
+        lastError = err.message
+        continue
+      }
+      // Connection errors (ECONNREFUSED, timeout) — don't try other paths
+      console.warn(`  ⚠ OpenClaw notification failed: ${err.message}`)
+      return { ok: false, error: err.message }
     }
-
-    return { ok: true, status: response.status }
-
-  } catch (err) {
-    console.warn(`  ⚠ OpenClaw notification failed: ${err.message}`)
-    return { ok: false, error: err.message }
   }
+
+  // All endpoints returned 405
+  console.warn(`  ⚠ OpenClaw notification failed: all endpoints returned 405.`)
+  console.warn(`    Check that hooks.enabled=true in OpenClaw config.yaml and restart OpenClaw.`)
+  console.warn(`    Host: ${host}`)
+  return { ok: false, error: lastError }
 }
 
 /**
